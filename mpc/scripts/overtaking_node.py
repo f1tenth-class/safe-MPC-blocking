@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
@@ -13,18 +14,23 @@ from generate_waypoints import get_waypoints, get_speed_lookup
 from scipy.spatial.transform import Rotation
 
 RACE_PATH = 0
-INSIDE_PATH = 1
-OUTSIDE_PATH = 2
+OUTSIDE_PATH = 1
+INSIDE_PATH = 2
 
 class OverTaking(Node):
-    def __init__(self):
-        super().__init__('overtaking_node')
-
+    def __init__(self, ego=True):
+        super().__init__('overtaking_node' if ego else 'opp_node')
+        self.ego = ego
         # TODO: create subscribers and publishers
         #self.laser_sub = self.create_subscription(LaserScan, '/scan',self.scan_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-        self.viz_pub = self.create_publisher(Marker, '/pure_pursuit', 10)
+        if ego:
+            self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
+            self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+            self.viz_pub = self.create_publisher(Marker, '/ego_racecar/pure_pursuit', 10)
+        else:
+            self.odom_sub = self.create_subscription(Odometry, '/opp_racecar/odom', self.odom_callback, 10)
+            self.drive_pub = self.create_publisher(AckermannDriveStamped, '/opp_drive', 10)
+            self.viz_pub = self.create_publisher(Marker, '/opp_racecar/pure_pursuit', 10)
 
         # Pure pursuit params
         self.L = 1.2
@@ -35,12 +41,8 @@ class OverTaking(Node):
         self.curr_path = RACE_PATH
         self.overtake_dist = 1.5 # How close should the car infront be before we try overtaking
 
-        self.waypoints = [] # array containing all waypoint arrays
-        self.speeds = []
-        race = 'waypoints/path.npy'
-        inside = 'waypoints/path.npy'
-        outside = 'waypoints/path.npy'
-        self.load_waypoints(race, inside, outside)
+        self.waypoints = get_waypoints() # array containing all waypoint arrays
+        self.speeds = get_speed_lookup()
 
     def viz_point(self, pose, id, thick=False):
         marker = Marker()
@@ -70,9 +72,9 @@ class OverTaking(Node):
             marker.color.b = 0.0
         self.viz_pub.publish(marker)
     
-    def viz_path(self):
+    def viz_path(self, path, color, id):
         viz_waypoints = []
-        for waypoint in self.waypoints[self.curr_path]:
+        for waypoint in path:
             p = Point()
             p.x = waypoint[0]
             p.y = waypoint[1]
@@ -81,25 +83,16 @@ class OverTaking(Node):
         marker = Marker()
         marker.header.frame_id = 'map'
         marker.ns = 'path'
-        marker.id = 0
+        marker.id = id
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.points = viz_waypoints
         marker.scale.x = 0.1
         marker.color.a = 1.0
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
         self.viz_pub.publish(marker)
-
-    def load_waypoints(self, race, inside, outside):
-        self.waypoints.append(get_waypoints())
-        self.waypoints.append(np.load(inside))
-        self.waypoints.append(np.load(outside))
-
-        self.speeds.append(np.ones(len(self.waypoints[RACE_PATH])) * 3.)
-        self.speeds.append(np.ones(len(self.waypoints[INSIDE_PATH])) * 3.)
-        self.speeds.append(np.ones(len(self.waypoints[OUTSIDE_PATH])) * 3.)
 
     def get_range(self, range_data, angle):
         # The line below is: angle_in_lidar = 135deg - angle
@@ -205,7 +198,10 @@ class OverTaking(Node):
     def odom_callback(self, msg):
         # Find the current waypoint to track using methods mentioned in lecture
         pose = msg.pose.pose.position
-        self.viz_path()
+        if self.ego:
+            colors = [(1., 0., 0.), (0., 1., 0.), (0., 0., 1.)]
+            for i, (color, path) in enumerate(zip(colors, self.waypoints)):
+                self.viz_path(path, color, i)
         
         # Find waypoint and convert to car frame
         # get a rotation matrix from the quaternion
@@ -226,20 +222,33 @@ class OverTaking(Node):
 
         # Calculate and publish steering angle (clip to min and max steering angle)
         steering_angle = np.clip(curvature * self.K, -.36, .36) * np.sign(waypoint[1])
-        print(f"Steering angle: {steering_angle}, curvature: {curvature}")
+        speed = 3. if self.ego else 1.
+        #print(f"Steering angle: {steering_angle}, curvature: {curvature}")
         self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed)))
 
 def main(args=None):
     rclpy.init(args=args)
     print("Overtaking Initialized")
-    overtaking_node = OverTaking()
-    rclpy.spin(overtaking_node)
+    overtaking_node = OverTaking(ego=True)
+    opp_node = OverTaking(ego=False)
+    
+    executor = MultiThreadedExecutor()
 
-    # Destroy the node explicitly
-    # (optional - otherwise it will be done automatically
-    # when the garbage collector destroys the node object)
-    overtaking_node.destroy_node()
-    rclpy.shutdown()
+    executor.add_node(overtaking_node)
+    executor.add_node(opp_node)
+
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        executor.shutdown()
+        # Destroy the node explicitly
+        # (optional - otherwise it will be done automatically
+        # when the garbage collector destroys the node object)
+        overtaking_node.destroy_node()
+        opp_node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
