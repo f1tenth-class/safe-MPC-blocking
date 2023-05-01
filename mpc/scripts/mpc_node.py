@@ -19,7 +19,6 @@ from nav_msgs.msg import Odometry
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 import generate_waypoints
-# from tf_transformations import euler_from_quaternion
 from scipy import sparse
 
 import math
@@ -61,12 +60,17 @@ class mpc_config:
         default_factory=lambda: np.diag([0.01, 100.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
+        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])*0.2
         #default_factory=lambda: np.diag([15, 15, 5.5, 13.0])
     )  # state error cost matrix, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
     Qfk: list = field(
         default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
     )  # final state error matrix, penalty  for the final state constraints: [x, y, delta, v, yaw, yaw-rate, beta]
+
+    Qb: list = field(
+        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
+    )  # cost matrix for error of our state with state of Behind car, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
+
     # --------------------#speed = min(speed, 6.)-------------------------------
 
     N_IND_SEARCH: int = 20  # Search index number
@@ -208,7 +212,7 @@ class MPC(Node):
                     ref_path[3,ii] = 2*np.pi + ref_path[3,ii]
 
         x0 = [vehicle_state.x, vehicle_state.y, vehicle_state.v, vehicle_state.yaw]
-
+        xb = [0.0, 0.0] # TODO: Fill this with x and y value of the car behind us
         
 
         # TODO: solve the MPC control problem
@@ -220,7 +224,7 @@ class MPC(Node):
             oyaw,
             ov,
             state_predict,
-        ) = self.linear_mpc_control(ref_path, x0, self.oa, self.odelta_v)
+        ) = self.linear_mpc_control(ref_path, x0, xb, self.oa, self.odelta_v)
 
         # TODO: publish drive message.
         steer_output = self.odelta_v[0]
@@ -258,6 +262,10 @@ class MPC(Node):
         self.ref_traj_k = cvxpy.Parameter((self.config.NXK, self.config.TK + 1))
         self.ref_traj_k.value = np.zeros((self.config.NXK, self.config.TK + 1))
 
+        # Initialize state of Behind car as a parameter
+        self.xb = cvxpy.Parameter((self.config.NXK,))
+        self.xb.value = np.zeros((self.config.NXK,))
+
         # Initializes block diagonal form of R = [R, R, ..., R] (NU*T, NU*T)
         R_block = block_diag(tuple([self.config.Rk] * self.config.TK))
 
@@ -268,6 +276,9 @@ class MPC(Node):
         Q_block = [self.config.Qk] * (self.config.TK)
         Q_block.append(self.config.Qfk)
         Q_block = block_diag(tuple(Q_block))
+
+        # Initialize block diagonal for error with Behind car
+        Qb_block = block_diag(tuple([self.config.Qb]))
 
         # Formulate and create the finite-horizon optimal control problem (objective function)
         # The FTOCP has the horizon of T timesteps
@@ -296,16 +307,16 @@ class MPC(Node):
             udiff = self.uk[:,k+1]-self.uk[:,k]
             controldiff += cvxpy.quad_form(udiff, self.config.Rdk)
 
-        ##### FINAL PROJECT OBJECTIVE STARTS HERE  
+        ##### BLOCKING OBJECTIVE 
         # Objective: Use the pose of the rear vehicle in MPC. Use additional MPC term to balance following the
         #   race line with blocking the previous cars.
 
-        controldiff = 0
-        for k in range(self.config.TK-1):
-            udiff = self.uk[:,k+1]-self.uk[:,k]
-            controldiff += cvxpy.quad_form(udiff, self.config.Rdk)
+        blocking = 0
+        for k in range(self.config.TK):
+            xbdiff = self.xk[:,k] - self.xb[:]
+            blocking += cvxpy.quad_form(xbdiff, self.config.Qb)
 
-        objective = controls+trajectory+controldiff
+        objective = controls + trajectory + controldiff + blocking
 
         # --------------------------------------------------------
 
@@ -513,7 +524,7 @@ class MPC(Node):
 
         return A, B, C
 
-    def mpc_prob_solve(self, ref_traj, path_predict, x0):
+    def mpc_prob_solve(self, ref_traj, path_predict, x0, xb):
         self.x0k.value = x0
 
         A_block = []
@@ -536,6 +547,7 @@ class MPC(Node):
         self.Ck_.value = C_block
 
         self.ref_traj_k.value = ref_traj
+        self.xb.value = xb
 
         # Solve the optimization problem in CVXPY
         # Solver selections: cvxpy.OSQP; cvxpy.GUROBI
@@ -558,7 +570,7 @@ class MPC(Node):
 
         return oa, odelta, ox, oy, oyaw, ov
 
-    def linear_mpc_control(self, ref_path, x0, oa, od):
+    def linear_mpc_control(self, ref_path, x0, xb, oa, od):
         """
         MPC contorl with updating operational point iteraitvely
         :param ref_path: reference trajectory in T steps
@@ -577,7 +589,7 @@ class MPC(Node):
 
         # Run the MPC optimization: Create and solve the optimization problem
         mpc_a, mpc_delta, mpc_x, mpc_y, mpc_yaw, mpc_v = self.mpc_prob_solve(
-            ref_path, path_predict, x0
+            ref_path, path_predict, x0, xb
         )
 
         return mpc_a, mpc_delta, mpc_x, mpc_y, mpc_yaw, mpc_v, path_predict
