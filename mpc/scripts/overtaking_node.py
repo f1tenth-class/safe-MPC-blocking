@@ -22,15 +22,32 @@ class OverTaking(Node):
         super().__init__('overtaking_node' if ego else 'opp_node')
         self.ego = ego
         # TODO: create subscribers and publishers
-        #self.laser_sub = self.create_subscription(LaserScan, '/scan',self.scan_callback, 10)
         if ego:
             self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
             self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
             self.viz_pub = self.create_publisher(Marker, '/ego_racecar/pure_pursuit', 10)
+            self.opp_sub = self.create_subscription(Odometry, '/ego_racecar/opp_odom', self.opp_callback, 10)
+            self.laser_sub = self.create_subscription(LaserScan, '/scan',self.scan_callback, 10)
         else:
             self.odom_sub = self.create_subscription(Odometry, '/opp_racecar/odom', self.odom_callback, 10)
             self.drive_pub = self.create_publisher(AckermannDriveStamped, '/opp_drive', 10)
             self.viz_pub = self.create_publisher(Marker, '/opp_racecar/pure_pursuit', 10)
+            self.opp_sub = self.create_subscription(Odometry, '/opp_racecar/opp_odom', self.opp_callback, 10)
+            self.laser_sub = self.create_subscription(LaserScan, '/opp_scan',self.scan_callback, 10)
+
+        # Lidar params
+        # Right of the car is the end of the array
+        self.angle_min = -2.3499999046325684
+        self.angle_max = 2.3499999046325684
+        self.angle_incr = 0.004351851996034384
+        self.arr_len = 1080
+        self.range_min = 0.
+        self.range_max = 30.
+        # For 90 deg
+        self.min_idx = int((-np.pi/2. - self.angle_min)/self.angle_incr)
+        self.max_idx = int((np.pi/2. - self.angle_min)/self.angle_incr)
+        self.left = 0.
+        self.right = 0.
 
         # Pure pursuit params
         self.L = 1.2
@@ -39,10 +56,15 @@ class OverTaking(Node):
 
         # Overtaking params
         self.curr_path = RACE_PATH
-        self.overtake_dist = 1.5 # How close should the car infront be before we try overtaking
+        self.overtake_dist = 1. # How close should the car infront be before we try overtaking
+        self.cutoff_dist = 2.5 # How far ahead should we be before we cut back into the racing line
+        self.overtake_width = .5 # How far to the side should the car infront be before we consider it safe to pass
 
         self.waypoints = get_waypoints() # array containing all waypoint arrays
         self.speeds = get_speed_lookup()
+
+        self.opp_pose = None
+        self.overtaking = False
 
     def viz_point(self, pose, id, thick=False):
         marker = Marker()
@@ -94,51 +116,79 @@ class OverTaking(Node):
         marker.color.b = color[2]
         self.viz_pub.publish(marker)
 
-    def get_range(self, range_data, angle):
-        # The line below is: angle_in_lidar = 135deg - angle
-        #angle_in_lidar = -1*self.angle_min - angle
-        angle_in_lidar = -1*self.angle_min + angle
-        index = int(angle_in_lidar/self.angle_incr)
-        return range_data[index]
-    
-    def overtaking_check(self, msg, location, path, waypoint):
-        rangetocheck = 1
-        if (self.get_dist(waypoint,location)< rangetocheck):
-            pathgood = self.close_to_obstacle(waypoint,location,msg)
-            if (pathgood == False):
-                path = self.select_new_path(path)
-    
-    def get_dist(self, waypoint_location,car_location_in_world):
-        return (((car_location_in_world[0]-waypoint_location[0])**2 + (car_location_in_world[1]-waypoint_location[1])**2 )**.5)
-
-    def Select_new_path(path):
-        if (path == 2):
-            return 1
-        else:
-            return 2
-        
-    #helper function checks to see if a given waypoint is close to a lidar detected obstacle
-    def close_to_obstacle(self,waypoint_location, self_location, msg):
-        range_we_care_about=1
-        max_acceptable_dist_from_obstacle= .2
-        rangedata=msg.ranges
-        angle1rad=(60*np.pi)/180
-        #the heading angle of the car
-        heading=0
-        angles = np.linspace(-angle1rad, angle1rad, num=10)
-        for angle in angles:
-            theta= (3.14/2)-angle-heading
-            dist= self.get_range(rangedata,angle)
-            if (dist< range_we_care_about):
-                obstacle_location_in_world_frame= (self_location[0]+np.cos(theta)*dist, self_location[1]+np.sin(theta)*dist)
-                if (self.get_dist(waypoint_location, obstacle_location_in_world_frame)<max_acceptable_dist_from_obstacle):
-                    return False
-        return True
-
     def scan_callback(self, msg):
-        pass
+        ranges = msg.ranges
+        ranges = np.clip(ranges, self.range_min, self.range_max)
+        # Take 20 readings ~5 deg
+        self.left = np.mean(ranges[self.min_idx-10:self.min_idx+10])
+        self.right = np.mean(ranges[self.max_idx-10:self.max_idx+10])
 
-    def find_waypoint(self, pose_in):
+    def find_waypointV2(self, pose, H, path, set_var=True):
+        # Requirements for waypoint:
+        # Must be ahead of the car, unless there are none
+        # Must be the closest to L meters away
+        orig_pose = pose
+        look_ahead = np.ceil((self.L + .5) * 10) # Waypoint density is roughly 10 per m, check an extra .5 meter
+        pose = np.array([pose.x, pose.y]) # ignore the z
+        curr_waypoints = self.waypoints[path]
+        curr_speeds = self.speeds[path]
+
+        dists = np.linalg.norm(curr_waypoints - pose, axis=1)
+        # This tolerance param is quite important, dependent on waypoint density 
+        canidates = np.argwhere(np.isclose(dists, self.L, atol=.3)) 
+
+        if len(canidates) == 0:
+            idx = np.argmin(dists)
+            if set_var:
+                self.curr_waypoint = idx
+            return curr_waypoints[idx], curr_speeds[idx]
+            
+        # Check which points are ahead of the car
+        points = curr_waypoints[canidates].reshape(len(canidates), 2)
+        points = np.concatenate((points, np.array([[0,1]] * len(canidates))), axis=1) # Add a 0, 1 for the z
+        points = (H @ points.T).T
+        points = (points / points[:,-1][:, np.newaxis])[:, :-1] # normalize and remove last element
+        canidates = canidates[points[:,0] > 0]
+
+        if len(canidates) == 0:
+            # Use old method to find point
+            print("No canidates ahead of the car")
+            return self.find_waypoint(orig_pose, set_var=set_var)
+        
+        # Get the point furtherest along the path as the canidate point
+        idx = canidates.max()
+
+        # # Do some checking to make sure that the idx is the first value that is greater than L for interp
+        # if idx < 5:
+        #     wrapped_dists = np.concatenate((dists[idx-5:], dists[:idx+5]))
+        #     temp_idx = np.argmax(wrapped_dists > self.L)
+        #     idx = (idx + (temp_idx - 5))
+        #     if idx < 0:
+        #         idx += len(dists)
+        # elif idx > len(dists) - 5:
+        #     wrapped_dists = np.concatenate((dists[idx-5:], dists[:5-(len(dists)-idx)]))
+        #     temp_idx = np.argmax(wrapped_dists > self.L)
+        #     idx = (idx + (temp_idx - 5))
+        #     if idx > len(dists) - 1:
+        #         idx -= len(dists)
+        # else:
+        #     idx = np.argmax(dists[idx-5:idx+5] > self.L)
+
+        # Interpolation
+        start = curr_waypoints[idx - 1]
+        end = curr_waypoints[idx]
+        interp = (self.L - dists[idx - 1]) / (dists[idx] - dists[idx - 1]) # interpolation factor
+        
+        interp_waypoint = start + interp * (end - start)
+        if not np.isclose(np.linalg.norm(interp_waypoint - pose), self.L, rtol=1e-2):
+            #print(f"Interpolation is not within .01 meters of L, {self.L}")
+            #raise ValueError("Interpolation is not within .01 meters of L")
+            duh = 1
+        if set_var:
+            self.curr_waypoint = idx
+        return interp_waypoint, curr_speeds[idx]
+
+    def find_waypoint(self, pose_in, set_var=True):
         """ Find the next desired waypoint
         Points are in 2D
         1. Only look 'forward' in the waypoint array from the current (loops back at the end)
@@ -171,12 +221,12 @@ class OverTaking(Node):
                 end = waypoints[i]
                 break
         if end is None or i == 0:
-            print(f"Error couldn't find valid waypoint!, {self.L}, {end}, {i}")
+            #print(f"Error couldn't find valid waypoint!, {self.L}, {end}, {i}")
             # Here assume that we are "lost"
             # Find the nearest waypoint, set this as the current waypoint and recall this function
             i = np.argmin(dists)
-
-            self.curr_waypoint = i
+            if set_var:
+                self.curr_waypoint = i
             self.viz_point(curr_waypoints[i], 0, thick=True)
             return curr_waypoints[i], curr_speeds[dists.argmin()]
 
@@ -186,15 +236,47 @@ class OverTaking(Node):
         
         interp_waypoint = start + interp * (end - start)
         if not np.isclose(np.linalg.norm(interp_waypoint - pose), self.L, rtol=1e-2):
-            print(f"Interpolation is not within .01 meters of L, {self.L}")
+            #print(f"Interpolation is not within .01 meters of L, {self.L}")
             #raise ValueError("Interpolation is not within .01 meters of L")
-
-        self.curr_waypoint = (self.curr_waypoint + i - 1) % len(curr_waypoints)
-
-        self.viz_point(interp_waypoint, 0, thick=True)
+            duh = 1
+        if set_var:
+            self.curr_waypoint = (self.curr_waypoint + i - 1) % len(curr_waypoints)
 
         return interp_waypoint, curr_speeds[dists.argmin()]
     
+    def overtaking_controller(self, dist, opp_pose, pose, H):
+        # Handle any overtaking logic of which path to be on and what not
+        if not self.overtaking and dist < self.overtake_dist and opp_pose[0] > 0: # want car to be infront in the pos x dir
+            print('overtake!', opp_pose)
+            if np.abs(opp_pose[1]) < self.overtake_width:
+                # Gap is too small, switch to a diff path
+                inside_point, inside_speed = self.find_waypointV2(pose, H, INSIDE_PATH, set_var=False)
+                outside_point, outside_speed = self.find_waypointV2(pose, H, OUTSIDE_PATH, set_var=False)
+                print(inside_point, outside_point)
+                inside_point = H @ np.concatenate([inside_point, [0, 1]]) # Add a 0, 1 for the z, homography
+                inside_point = (inside_point / inside_point[-1])[:-1] # normalize and remove last element
+
+                outside_point = H @ np.concatenate([outside_point, [0, 1]]) # Add a 0, 1 for the z, homography
+                outside_point = (outside_point / outside_point[-1])[:-1] # normalize and remove last element
+
+                print(np.abs(inside_point[1] - opp_pose[1]), np.abs(outside_point[1] - opp_pose[1]))
+                print(inside_point, outside_point, opp_pose)
+                if np.abs(inside_point[1]) > np.abs(outside_point[1]):
+                    print('switch to inside')
+                    self.curr_path = INSIDE_PATH
+                    self.overtaking = True
+                else:
+                    print('switch to outside')
+                    self.curr_path = OUTSIDE_PATH
+                    self.overtaking = True
+        elif self.overtaking and opp_pose[0] < -self.cutoff_dist:
+            # If we are in overtaking mode and sufficently ahead of the other car, switch back to raceline
+            print(opp_pose)
+            self.curr_path = RACE_PATH
+            self.overtaking = False
+            print('done overtaking')
+
+
     def odom_callback(self, msg):
         # Find the current waypoint to track using methods mentioned in lecture
         pose = msg.pose.pose.position
@@ -212,12 +294,21 @@ class OverTaking(Node):
         H[:3, :3] = rot_mat[:3, :3]
         H[:3, 3] = [pose.x, pose.y, pose.z]
         H = np.linalg.inv(H)
-        waypoint, speed = self.find_waypoint(pose)
+        
+        # Overtaking check
+        if self.ego and self.opp_pose is not None:
+            dist = np.linalg.norm(np.array([self.opp_pose.x, self.opp_pose.y]) - np.array([pose.x, pose.y]))
+            opp_pose = H @ np.concatenate([np.array([self.opp_pose.x, self.opp_pose.y]), [0, 1]]) # Add a 0, 1 for the z, homography
+            opp_pose = (opp_pose / opp_pose[-1])[:-1] # normalize and remove last element
+            self.overtaking_controller(dist, opp_pose, pose, H)
+
+        waypoint, speed = self.find_waypointV2(pose, H, self.curr_path, set_var=True)
+        self.viz_point(waypoint, 0, thick=True)
 
         waypoint = H @ np.concatenate([waypoint, [0, 1]]) # Add a 0, 1 for the z, homography
         waypoint = (waypoint / waypoint[-1])[:-1] # normalize and remove last element
 
-                # Calculate curvature/steering angle 2|y|/L^2
+        # Calculate curvature/steering angle 2|y|/L^2
         curvature = 2 * np.abs(waypoint[1]) / (self.L ** 2)
 
         # Calculate and publish steering angle (clip to min and max steering angle)
@@ -226,9 +317,14 @@ class OverTaking(Node):
         #print(f"Steering angle: {steering_angle}, curvature: {curvature}")
         self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed)))
 
+    def opp_callback(self, msg):
+        # Opposition odom callback
+        self.opp_pose = msg.pose.pose.position
+
 def main(args=None):
     rclpy.init(args=args)
     print("Overtaking Initialized")
+
     overtaking_node = OverTaking(ego=True)
     opp_node = OverTaking(ego=False)
     
@@ -250,6 +346,10 @@ def main(args=None):
         opp_node.destroy_node()
         rclpy.shutdown()
 
+    overtaking_node = OverTaking(ego=True)
+    rclpy.spin(overtaking_node)
+    overtaking_node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
