@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+from rcl_interfaces.msg import ParameterDescriptor
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
@@ -12,6 +13,7 @@ from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 from generate_waypoints import get_waypoints, get_speed_lookup
 from scipy.spatial.transform import Rotation
+import sys
 
 RACE_PATH = 0
 OUTSIDE_PATH = 1
@@ -20,9 +22,14 @@ INSIDE_PATH = 2
 class OverTaking(Node):
     def __init__(self, ego=True):
         super().__init__('overtaking_node' if ego else 'opp_node')
+        # Launch file stuff to hopefully use in the future
+        param_descriptor = ParameterDescriptor(description='ego or not')
+        self.declare_parameter('ego', True, param_descriptor)
+        self.ego = self.get_parameter('ego').get_parameter_value().bool_value
         self.ego = ego
+
         # TODO: create subscribers and publishers
-        if ego:
+        if self.ego:
             self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
             self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
             self.viz_pub = self.create_publisher(Marker, '/ego_racecar/pure_pursuit', 10)
@@ -56,8 +63,8 @@ class OverTaking(Node):
 
         # Overtaking params
         self.curr_path = RACE_PATH
-        self.overtake_dist = 1. # How close should the car infront be before we try overtaking
-        self.cutoff_dist = 2.5 # How far ahead should we be before we cut back into the racing line
+        self.overtake_dist = 1.2 # How close should the car infront be before we try overtaking
+        self.cutoff_dist = .75 # How far ahead should we be before we cut back into the racing line
         self.overtake_width = .5 # How far to the side should the car infront be before we consider it safe to pass
 
         self.waypoints = get_waypoints() # array containing all waypoint arrays
@@ -246,21 +253,21 @@ class OverTaking(Node):
     
     def overtaking_controller(self, dist, opp_pose, pose, H):
         # Handle any overtaking logic of which path to be on and what not
-        if not self.overtaking and dist < self.overtake_dist and opp_pose[0] > 0: # want car to be infront in the pos x dir
+        #print(opp_pose)
+        if dist < self.overtake_dist and opp_pose[0] > 0: # want car to be infront in the pos x dir
             print('overtake!', opp_pose)
-            if np.abs(opp_pose[1]) < self.overtake_width:
+            threshold = self.overtake_width if not self.overtaking else self.overtake_width / 5
+            if np.abs(opp_pose[1]) < threshold:
                 # Gap is too small, switch to a diff path
                 inside_point, inside_speed = self.find_waypointV2(pose, H, INSIDE_PATH, set_var=False)
                 outside_point, outside_speed = self.find_waypointV2(pose, H, OUTSIDE_PATH, set_var=False)
-                print(inside_point, outside_point)
+
                 inside_point = H @ np.concatenate([inside_point, [0, 1]]) # Add a 0, 1 for the z, homography
                 inside_point = (inside_point / inside_point[-1])[:-1] # normalize and remove last element
 
                 outside_point = H @ np.concatenate([outside_point, [0, 1]]) # Add a 0, 1 for the z, homography
                 outside_point = (outside_point / outside_point[-1])[:-1] # normalize and remove last element
 
-                print(np.abs(inside_point[1] - opp_pose[1]), np.abs(outside_point[1] - opp_pose[1]))
-                print(inside_point, outside_point, opp_pose)
                 if np.abs(inside_point[1]) > np.abs(outside_point[1]):
                     print('switch to inside')
                     self.curr_path = INSIDE_PATH
@@ -269,13 +276,16 @@ class OverTaking(Node):
                     print('switch to outside')
                     self.curr_path = OUTSIDE_PATH
                     self.overtaking = True
-        elif self.overtaking and opp_pose[0] < -self.cutoff_dist:
-            # If we are in overtaking mode and sufficently ahead of the other car, switch back to raceline
-            print(opp_pose)
-            self.curr_path = RACE_PATH
-            self.overtaking = False
-            print('done overtaking')
-
+        elif self.overtaking:
+            if opp_pose[0] < -self.cutoff_dist:
+                # If we are in overtaking mode and sufficently ahead of the other car, switch back to raceline
+                self.curr_path = RACE_PATH
+                self.overtaking = False
+                print('done overtaking', opp_pose)
+            elif dist > self.overtake_dist + .2 and opp_pose[0] > 0:
+                self.curr_path = RACE_PATH
+                self.overtaking = False
+                print('overtake failed')
 
     def odom_callback(self, msg):
         # Find the current waypoint to track using methods mentioned in lecture
@@ -313,7 +323,8 @@ class OverTaking(Node):
 
         # Calculate and publish steering angle (clip to min and max steering angle)
         steering_angle = np.clip(curvature * self.K, -.36, .36) * np.sign(waypoint[1])
-        speed = 3. if self.ego else 1.
+        speed = 1.5 if self.ego else 1.
+        #speed = 0.1
         #print(f"Steering angle: {steering_angle}, curvature: {curvature}")
         self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed)))
 
@@ -321,35 +332,42 @@ class OverTaking(Node):
         # Opposition odom callback
         self.opp_pose = msg.pose.pose.position
 
-def main(args=None):
+def main(args=None,ego='two'):
     rclpy.init(args=args)
     print("Overtaking Initialized")
 
-    overtaking_node = OverTaking(ego=True)
-    opp_node = OverTaking(ego=False)
-    
-    executor = MultiThreadedExecutor()
+    if ego == 'two':
+        print('two car mode')
+        # Two car mode NOTE THIS DOES NOT WORK BC THE THREADS ARE BLOCKING
+        
+        overtaking_node = OverTaking(ego=True)
+        opp_node = OverTaking(ego=False)
+        
+        executor = MultiThreadedExecutor()
 
-    executor.add_node(overtaking_node)
-    executor.add_node(opp_node)
+        executor.add_node(overtaking_node)
+        executor.add_node(opp_node)
 
-    try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        executor.shutdown()
-        # Destroy the node explicitly
-        # (optional - otherwise it will be done automatically
-        # when the garbage collector destroys the node object)
+        try:
+            executor.spin()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            executor.shutdown()
+            # Destroy the node explicitly
+            # (optional - otherwise it will be done automatically
+            # when the garbage collector destroys the node object)
+            overtaking_node.destroy_node()
+            opp_node.destroy_node()
+            rclpy.shutdown()
+    else:
+        print(f'one car mode {ego}')
+        ego = True if ego == 'ego' else False
+        overtaking_node = OverTaking(ego=ego)
+        rclpy.spin(overtaking_node)
         overtaking_node.destroy_node()
-        opp_node.destroy_node()
         rclpy.shutdown()
 
-    overtaking_node = OverTaking(ego=True)
-    rclpy.spin(overtaking_node)
-    overtaking_node.destroy_node()
-    rclpy.shutdown()
-
 if __name__ == '__main__':
-    main()
+    ego = sys.argv[1] if len(sys.argv) > 1 else 'two'
+    main(ego=ego)
