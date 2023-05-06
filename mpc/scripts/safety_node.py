@@ -38,18 +38,7 @@ class SafetyNode(Node):
         self.speed = speed
 
     def scan_callback(self, scan_msg):
-        # TODO: calculate TTC
-        #if(self.ranges[0]==0.0):
-        #    self.ranges=scan_msg.ranges
-        #    self.time=scan_msg.header.stamp.sec
-        #    self.get_logger().info(str(scan_msg.header.stamp.sec))
-        #    #self.get_logger().info(str(self.time) )
-        #    self.get_logger().info("first") 
-        #newranges=scan_msg.ranges
-        #min=int(scan_msg.range_min)
-        #max=int(scan_msg.range_max)
-        #newranges=np.clip(newranges,min,max)
-        minttc=1.4
+        minttc=.8
         ranges=scan_msg.ranges
         length=len(ranges)
         angles=np.arange(start=scan_msg.angle_min, stop=scan_msg.angle_max, step=scan_msg.angle_increment)
@@ -57,36 +46,15 @@ class SafetyNode(Node):
         v=np.clip(v,0,None)
         v=np.clip(v,.001,None)
         ttc=ranges/v
+        length=len(ttc)
+        trim=length/4
+        ttc=ttc[trim:length-trim]
         if (any(ttc<minttc)):
-        #OTHER METHOD
-        #rprime=np.subtract(newranges,self.ranges)
-        #newtime=scan_msg.header.stamp.sec
-        #deltaT=newtime-self.time
-        #self.time=newtime
-        #if(deltaT>0):
-        #    rprime=rprime/(deltaT)
-        #timetocollision=np.ones(1080)*np.inf
-        #rprime=-1*rprime
-        #rprime=np.clip(rprime,0,None)
-        #timetocollision= np.divide(newranges,(rprime))
-        #self.get_logger().info(str(newranges))
-        #if (any(timetocollision<.05)):
                 msg = AckermannDriveStamped()
-                msg.drive.speed=0.0
+                msg.drive.speed=1.0
                 self.publisher_.publish(msg)
                 self.get_logger().info("braking")
-        #if(timetocollision[540]<.09):
-        #        msg = AckermannDriveStamped()
-        #        msg.drive.speed=0.0
-        #        self.publisher_.publish(msg)
-        #        self.get_logger().info("secondary")
-        #min=np.min(timetocollision)
-        #self.ranges=newranges
-        
-        #self.get_logger().info("mintimetocollision= "+ str(min))
-        #self.get_logger().info("angle= "+ str(angles[index]))
-        #self.get_logger().info("dist.= "+ str(newranges[index]))
-        
+ 
         
         
 
