@@ -60,11 +60,11 @@ class mpc_config:
         default_factory=lambda: np.diag([0.01, 100.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
+        default_factory=lambda: np.diag([40, 40, 5.5, 26.0])
         #default_factory=lambda: np.diag([15, 15, 5.5, 13.0])
     )  # state error cost matrix, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
     Qfk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
+        default_factory=lambda: np.diag([40, 40, 5.5, 26.0])
     )  # final state error matrix, penalty  for the final state constraints: [x, y, delta, v, yaw, yaw-rate, beta]
 
     Qb: list = field(
@@ -79,8 +79,8 @@ class mpc_config:
     LENGTH: float = 0.58  # Length of the vehicle [m]
     WIDTH: float = 0.31  # Width of the vehicle [m]
     WB: float = 0.33  # Wheelbase [m]
-    MIN_STEER: float = -0.3 # -0.4189  # maximum steering angle [rad]
-    MAX_STEER: float = 0.3# 0.4189  # maximum steering angle [rad]
+    MIN_STEER: float = -0.5 # -0.4189  # maximum steering angle [rad]
+    MAX_STEER: float = 0.5# 0.4189  # maximum steering angle [rad]
     MAX_DSTEER: float = np.deg2rad(180.0)  # maximum steering speed [rad/s]
     MAX_SPEED: float = 1.0 #6.0  # maximum speed [m/s]
     MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
@@ -115,7 +115,7 @@ class MPC(Node):
         # TODO: get waypoints here
         
         self.xy_waypoints = generate_waypoints.get_waypoints()[0]
-        self.speed_lookup = generate_waypoints.get_speed_lookup()[0]
+        self.speed_lookup =     generate_waypoints.get_speed_lookup()[0]
         self.waypoints_max_index = self.xy_waypoints.shape[0]-1
 
         # Create theta waypoints
@@ -213,7 +213,8 @@ class MPC(Node):
         #       with current vehicle pose.
         #       ref_x, ref_y, ref_yaw, ref_v are columns of self.waypoints
         # ref_path = self.calc_ref_trajectory(self, vehicle_state, ref_x, ref_y, ref_yaw, ref_v)
-        ref_path = self.calc_ref_trajectory(vehicle_state, self.waypoints[:,0], self.waypoints[:,1], self.waypoints[:,2], self.waypoints[:,3])
+        # ref_path = self.calc_ref_trajectory(vehicle_state, self.waypoints[:,0], self.waypoints[:,1], self.waypoints[:,2], self.waypoints[:,3])
+        ref_path = self.calc_ref_trajectory_from_opp(vehicle_state)
 
         # Same angle flipping logic as above
         if vehicle_state.y > 4.0:
@@ -242,7 +243,7 @@ class MPC(Node):
         steering_angle=steer_output
         # print(f"ang_curr = {np.round(x0[3],3)}, des_ang = {np.round(ref_path[3,0],3)}, steer = {np.round(steering_angle,5)}")
         # self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=0.0, speed=0.0)))
-
+        print(f"Steering = {steering_angle}")
         self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed_output)))
 
     def mpc_prob_init(self):
@@ -322,9 +323,9 @@ class MPC(Node):
         #   race line with blocking the previous cars.
 
         blocking = 0
-        for k in range(self.config.TK):
-            xbdiff = self.xk[:,k] - self.xb[:]
-            blocking += cvxpy.quad_form(xbdiff, self.config.Qb)
+        # for k in range(self.config.TK):
+        #     xbdiff = self.xk[:,k] - self.xb[:]
+        #     blocking += cvxpy.quad_form(xbdiff, self.config.Qb)
 
         objective = controls + trajectory + controldiff + blocking
 
@@ -430,9 +431,7 @@ class MPC(Node):
 
         # Find nearest index/setpoint from where the trajectories are calculated
         _, _, _, ind = nearest_point(np.array([state.x, state.y]), np.array([cx, cy]).T)
-        # print(cx[ind],cy[ind], (state.x,state.y))
-        self.next_waypoint=[(cx[ind+i],cy[ind+i]) if ind+i < ncourse else (cx[i-(ncourse-ind)], cy[i-(ncourse-ind)]) for i in range(10) ]
-        self.viz_next_waypoint()
+        
         # Load the initial parameters from the setpoint into the trajectory
         ref_traj[0, 0] = cx[ind]
         ref_traj[1, 0] = cy[ind]
@@ -440,7 +439,7 @@ class MPC(Node):
         ref_traj[3, 0] = cyaw[ind]
 
         # based on current velocity, distance traveled on the ref line between time steps
-        travel = abs(state.v) * self.config.DTK
+        travel = abs(state.v) * self.config.DTK * 0.8
         dind = travel / self.config.dlk
         ind_list = int(ind) + np.insert(
             np.cumsum(np.repeat(dind, self.config.TK)), 0, 0
@@ -449,6 +448,9 @@ class MPC(Node):
         ref_traj[0, :] = cx[ind_list]
         ref_traj[1, :] = cy[ind_list]
         ref_traj[2, :] = sp[ind_list]
+
+        self.next_waypoint=[(ref_traj[0,i],ref_traj[1,i]) for i in range(self.config.TK+1) ]
+        self.viz_next_waypoint()
         
         # Sachin - taking this out because it messes with my angle flipping logic in pose_callback
         # cyaw[cyaw - state.yaw > 4.5] = np.abs(
@@ -459,6 +461,30 @@ class MPC(Node):
         # )
         
         ref_traj[3, :] = cyaw[ind_list]
+
+        return ref_traj
+    
+    def calc_ref_trajectory_from_opp(self, state):
+        """
+        calc referent trajectory ref_traj in T steps: [x, y, v, yaw]
+        using the current velocity, calc the T points along the reference path
+        :param state: current state of the car
+        :return: reference trajectory ref_traj
+        """
+
+        # Create placeholder Arrays for the reference trajectory for T steps
+        ref_traj = np.zeros((self.config.NXK, self.config.TK + 1))
+
+        # Assume constant velocity of 0.5m/s.
+        travel = 0.5 * self.config.DTK                                                      # Dist travelled within one DTK time step
+        end_x = state.x + travel * self.config.TK                                           # We want to look self.config.TK time steps into the future
+        ref_traj[0, :] = np.linspace(start = state.x, stop = end_x, num = self.config.TK+1) # TK+1 time steps ahead along x
+        ref_traj[1, :] = self.opp_pose_y * np.ones((self.config.TK + 1,))                   # y is constant at our opponent's y
+        ref_traj[2, :] = 0.5 * np.ones((self.config.TK + 1,))                               # Const speed
+        ref_traj[3, :] = 0.0 * np.zeros((self.config.TK + 1,))                              # Assume constant angle for now
+
+        self.next_waypoint = [(ref_traj[0, i], ref_traj[1, i]) for i in range(self.config.TK + 1)]
+        self.viz_next_waypoint()
 
         return ref_traj
 

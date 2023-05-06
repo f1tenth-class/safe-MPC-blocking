@@ -29,7 +29,7 @@ class OverTaking(Node):
         self.ego = ego
 
         # TODO: create subscribers and publishers
-        if self.ego:
+        if not self.ego:
             self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
             self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
             self.viz_pub = self.create_publisher(Marker, '/ego_racecar/pure_pursuit', 10)
@@ -326,7 +326,8 @@ class OverTaking(Node):
         speed = 1.5 if self.ego else 1.
         #speed = 0.1
         #print(f"Steering angle: {steering_angle}, curvature: {curvature}")
-        self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed)))
+        # self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=steering_angle, speed=speed)))
+        self.drive_pub.publish(AckermannDriveStamped(drive=AckermannDrive(steering_angle=0.0, speed=0.0)))
 
     def opp_callback(self, msg):
         # Opposition odom callback

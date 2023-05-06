@@ -91,7 +91,7 @@ for corner1, corner2, corner3, corner4 in points:
     for corner in corners:
 
         curve = bezier.Curve(corner[1:].T, degree=2)
-        spline_x = np.linspace(0, 1, 10)
+        spline_x = np.linspace(0, 1, 30, endpoint=False)
         res = curve.evaluate_multi(spline_x)
         interp_corners.append(res.T)
 
