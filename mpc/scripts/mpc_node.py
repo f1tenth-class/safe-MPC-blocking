@@ -54,17 +54,20 @@ class mpc_config:
     # ---------------------------------------------------
     # TODO: you may need to tune the following matrices
     Rk: list = field(
-        default_factory=lambda: np.diag([0.01, 100.0])
+        default_factory=lambda: np.diag([0.01, 5.0])               # Weights to more aggressively follow the line
+        # default_factory=lambda: np.diag([0.01, 100.0])
     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.01, 100.0])
+        default_factory=lambda: np.diag([0.01, 5.0])               # Weights to more aggressively follow the line
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([40, 40, 5.5, 26.0])
+        default_factory=lambda: np.diag([90, 90, 5.5, 26.0])        # Weights to more aggressively follow the line
+        # default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
         #default_factory=lambda: np.diag([15, 15, 5.5, 13.0])
     )  # state error cost matrix, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
     Qfk: list = field(
-        default_factory=lambda: np.diag([40, 40, 5.5, 26.0])
+        default_factory=lambda: np.diag([90, 90, 5.5, 26.0])        # Weights to more aggressively follow the line
+        # default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
     )  # final state error matrix, penalty  for the final state constraints: [x, y, delta, v, yaw, yaw-rate, beta]
 
     Qb: list = field(
