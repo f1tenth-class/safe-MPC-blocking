@@ -60,7 +60,7 @@ class mpc_config:
         default_factory=lambda: np.diag([0.01, 100.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])*0.2
+        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
         #default_factory=lambda: np.diag([15, 15, 5.5, 13.0])
     )  # state error cost matrix, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
     Qfk: list = field(
@@ -68,7 +68,7 @@ class mpc_config:
     )  # final state error matrix, penalty  for the final state constraints: [x, y, delta, v, yaw, yaw-rate, beta]
 
     Qb: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 5.5, 26.0])
+        default_factory=lambda: np.diag([13.5, 13.5, 0.0, 0.0])
     )  # cost matrix for error of our state with state of Behind car, for the the next (T) prediction time steps [x, y, delta, v, yaw, yaw-rate, beta]
 
     # --------------------#speed = min(speed, 6.)-------------------------------
@@ -107,14 +107,16 @@ class MPC(Node):
         # TODO: create ROS subscribers and publishers
         #       use the MPC as a tracker (similar to pure pursuit)
 
-        self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.pose_callback, 10)
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+        self.odom_sub = self.create_subscription(Odometry, '/opp_racecar/odom', self.pose_callback, 10)
+        self.opp_odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.opp_callback, 10)
+        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/opp_drive', 10)
         self.viz_pub = self.create_publisher(Marker, '/waypoints', 10)
 
         # TODO: get waypoints here
         
-        self.xy_waypoints = generate_waypoints.get_waypoints()
-        self.speed_lookup = generate_waypoints.get_speed_lookup()    
+        self.xy_waypoints = generate_waypoints.get_waypoints()[0]
+        self.speed_lookup = generate_waypoints.get_speed_lookup()[0]
+        self.waypoints_max_index = self.xy_waypoints.shape[0]-1
 
         # Create theta waypoints
         next_xy_waypoints = np.concatenate([self.xy_waypoints[1:,:], self.xy_waypoints[0,:].reshape((1,2))])
@@ -122,7 +124,7 @@ class MPC(Node):
         self.waypoints = np.column_stack((self.xy_waypoints[:,0], self.xy_waypoints[:,1], self.thetas, self.speed_lookup))
 
         # Delete the duplicates
-        duplicate_indices = [621, 403, 321, 92, 10]
+        duplicate_indices = [513, 318, 262, 55, 10]
         self.waypoints = np.delete(self.waypoints, duplicate_indices, axis=0)
 
         self.config = mpc_config()
@@ -133,6 +135,14 @@ class MPC(Node):
 
         #initialize MPC problem
         self.mpc_prob_init()
+
+        self.opp_pose_x = 0.0
+        self.opp_pose_y = 0.0
+
+    def opp_callback(self, msg):
+        # Opposition odom callback
+        self.opp_pose_x = msg.pose.pose.position.x
+        self.opp_pose_y = msg.pose.pose.position.y
 
     def viz_waypoints(self):
                 
@@ -212,7 +222,7 @@ class MPC(Node):
                     ref_path[3,ii] = 2*np.pi + ref_path[3,ii]
 
         x0 = [vehicle_state.x, vehicle_state.y, vehicle_state.v, vehicle_state.yaw]
-        xb = [0.0, 0.0] # TODO: Fill this with x and y value of the car behind us
+        xb = [self.opp_pose_x, self.opp_pose_y, 0.0, 0.0]
         
 
         # TODO: solve the MPC control problem
@@ -421,7 +431,7 @@ class MPC(Node):
         # Find nearest index/setpoint from where the trajectories are calculated
         _, _, _, ind = nearest_point(np.array([state.x, state.y]), np.array([cx, cy]).T)
         # print(cx[ind],cy[ind], (state.x,state.y))
-        self.next_waypoint=[(cx[ind+i],cy[ind+i]) if ind+i < 617 else (cx[i-(617-ind)], cy[i-(617-ind)]) for i in range(10) ]
+        self.next_waypoint=[(cx[ind+i],cy[ind+i]) if ind+i < ncourse else (cx[i-(ncourse-ind)], cy[i-(ncourse-ind)]) for i in range(10) ]
         self.viz_next_waypoint()
         # Load the initial parameters from the setpoint into the trajectory
         ref_traj[0, 0] = cx[ind]
