@@ -38,7 +38,7 @@ class SafetyNode(Node):
         self.speed = speed
 
     def scan_callback(self, scan_msg):
-        minttc=.8
+        minttc=1.0
         ranges=scan_msg.ranges
         length=len(ranges)
         angles=np.arange(start=scan_msg.angle_min, stop=scan_msg.angle_max, step=scan_msg.angle_increment)
@@ -47,13 +47,15 @@ class SafetyNode(Node):
         v=np.clip(v,.001,None)
         ttc=ranges/v
         length=len(ttc)
-        trim=length/4
+        trim=int(length/5)
         ttc=ttc[trim:length-trim]
         if (any(ttc<minttc)):
                 msg = AckermannDriveStamped()
-                msg.drive.speed=1.0
+                msg.drive.speed=0.5
                 self.publisher_.publish(msg)
                 self.get_logger().info("braking")
+        else:
+             self.get_logger().info("not braking")
  
         
         
