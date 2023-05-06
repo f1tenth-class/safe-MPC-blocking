@@ -478,13 +478,20 @@ class MPC(Node):
         # Create placeholder Arrays for the reference trajectory for T steps
         ref_traj = np.zeros((self.config.NXK, self.config.TK + 1))
 
-        # Assume constant velocity of 0.5m/s.
+        # Calculate line params
+        m = (0.5 - (-0.5)) / (7.7 - (-16.))
+        c = self.opp_pose_y - m * self.opp_pose_x
+
+        # Calculate start and end of ref traj. Assume constant velocity of 0.5m/s.
+        start_y = m * state.x + c
         travel = 0.5 * self.config.DTK                                                      # Dist travelled within one DTK time step
         end_x = state.x + travel * self.config.TK                                           # We want to look self.config.TK time steps into the future
+        end_y = m * end_x + c
+
         ref_traj[0, :] = np.linspace(start = state.x, stop = end_x, num = self.config.TK+1) # TK+1 time steps ahead along x
-        ref_traj[1, :] = self.opp_pose_y * np.ones((self.config.TK + 1,))                   # y is constant at our opponent's y
+        ref_traj[1, :] = np.linspace(start = start_y, stop = end_y, num = self.config.TK+1) # y is constant at our opponent's y
         ref_traj[2, :] = 0.5 * np.ones((self.config.TK + 1,))                               # Const speed
-        ref_traj[3, :] = 0.0 * np.zeros((self.config.TK + 1,))                              # Assume constant angle for now
+        ref_traj[3, :] = np.arctan2(m, 1) * np.ones((self.config.TK + 1,))                    # Assume constant angle
 
         self.next_waypoint = [(ref_traj[0, i], ref_traj[1, i]) for i in range(self.config.TK + 1)]
         self.viz_next_waypoint()
