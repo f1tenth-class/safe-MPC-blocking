@@ -1,2 +1,5 @@
-# MPC-blocking-team-11
- Blocking strategy using model predictive control. Team 11 final project for ESE 6150 F1 Tenth Autonomous Vehicles.
+# Lightning MPCQueen - Safe MPC Blocking Strategy in F1/10 Autonomous Racing
+
+This work introduces a model predictive control (MPC) based blocking mechanism, and contrasts its performance with an MPC system that strictly adheres to the optimal racing line. Experiments are conducted under two scenarios: one without active blocking and another implementing the proposed blocking strategy. Inspired by game theoretical approaches, the research diverges by manually controlling the overtaking car, thus simulating varied real-world racing behaviors. The results offer insights into the effectiveness of the blocking strategy and highlight potential challenges and improvements for autonomous racing strategies.
+
+
